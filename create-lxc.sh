@@ -96,14 +96,37 @@ collect_config() {
   read -r CT_DISK
   CT_DISK="${CT_DISK:-8}"
 
-  # Storage
+  # Storage pre rootfs kontajnera
   echo
   echo -e "  ${W}Dostupné storage pooly:${N}"
-  pvesm status 2>/dev/null | awk 'NR>1 {printf "  %s  %s  %s\n", $1, $2, $7}' || true
+  pvesm status 2>/dev/null | awk 'NR>1 {printf "  %-15s %-10s %s\n", $1, $2, $7}' || true
   echo
-  ask "Storage pool [local-lvm]:"
+  ask "Storage pool pre rootfs kontajnera [local-lvm]:"
   read -r CT_STORAGE
   CT_STORAGE="${CT_STORAGE:-local-lvm}"
+
+  # Storage pre templates (musí podporovať vztmpl — typicky 'local')
+  # Automaticky nájdi storage s podporou templates
+  TMPL_STORAGE=""
+  while IFS= read -r line; do
+    local sname stype
+    sname=$(echo "$line" | awk '{print $1}')
+    stype=$(echo "$line" | awk '{print $2}')
+    if pvesm status "$sname" 2>/dev/null | grep -q "vztmpl" || [[ "$stype" == "dir" ]]; then
+      TMPL_STORAGE="$sname"
+      break
+    fi
+  done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1, $2}')
+
+  # Fallback — skús 'local' (štandardný dir storage v PVE)
+  if [[ -z "$TMPL_STORAGE" ]]; then
+    TMPL_STORAGE="local"
+  fi
+
+  # Ak je CT_STORAGE rovnaký typ ako template storage, použi ho; inak použi nájdený
+  if [[ "$CT_STORAGE" != "$TMPL_STORAGE" ]]; then
+    info "Templates budú stiahnuté do: $TMPL_STORAGE (rootfs: $CT_STORAGE)"
+  fi
 
   # Sieť
   echo
@@ -165,7 +188,8 @@ collect_config() {
   echo -e "  Hostname:    ${W}$CT_HOSTNAME${N}"
   echo -e "  RAM:         ${W}${CT_RAM} MB${N}"
   echo -e "  Disk:        ${W}${CT_DISK} GB${N}"
-  echo -e "  Storage:     ${W}$CT_STORAGE${N}"
+  echo -e "  Rootfs:      ${W}$CT_STORAGE${N}"
+  echo -e "  Templates:   ${W}$TMPL_STORAGE${N}"
   echo -e "  Sieť:        ${W}$CT_NET${N}"
   echo -e "  Bridge:      ${W}$CT_BRIDGE${N}"
   echo -e "  Nesting:     ${W}$( [[ $CT_NESTING -eq 1 ]] && echo 'áno' || echo 'nie' )${N}"
@@ -184,12 +208,12 @@ download_template() {
   local storage_path
 
   # Nájdi kde sú uložené templates
-  storage_path=$(pvesm path "$CT_STORAGE" 2>/dev/null || echo "/var/lib/vz")
+  storage_path=$(pvesm path "$TMPL_STORAGE" 2>/dev/null || echo "/var/lib/vz")
 
   # Skontroluj existujúce templates
   echo
   echo -e "  ${D}Dostupné templates:${N}"
-  pveam list "$CT_STORAGE" 2>/dev/null | grep -E 'debian|ubuntu' | head -6 || \
+  pveam list "$TMPL_STORAGE" 2>/dev/null | grep -E 'debian|ubuntu' | head -6 || \
     info "(žiadne lokálne — stiahnem)"
 
   echo
@@ -230,14 +254,14 @@ download_template() {
 
   # Skontroluj či je template už stiahnutý
   local tmpl_file
-  tmpl_file=$(pveam list "$CT_STORAGE" 2>/dev/null | grep "${CT_TEMPLATE%%_*}" | awk '{print $1}' | head -1) || true
+  tmpl_file=$(pveam list "$TMPL_STORAGE" 2>/dev/null | grep "${CT_TEMPLATE%%_*}" | awk '{print $1}' | head -1) || true
 
   if [[ -n "$tmpl_file" ]]; then
     ok "Template už existuje: $tmpl_file"
-    CT_TEMPLATE_PATH="${CT_STORAGE}:vztmpl/${CT_TEMPLATE}"
+    CT_TEMPLATE_PATH="${TMPL_STORAGE}:vztmpl/${CT_TEMPLATE}"
   else
     info "Sťahujem $CT_TEMPLATE ..."
-    if pveam download "$CT_STORAGE" "$CT_TEMPLATE" >> /tmp/claude-lxc-create.log 2>&1; then
+    if pveam download "$TMPL_STORAGE" "$CT_TEMPLATE" >> /tmp/claude-lxc-create.log 2>&1; then
       :
     else
       err "Stiahnutie template zlyhalo (exit code: $?)."
@@ -245,7 +269,7 @@ download_template() {
       tail -5 /tmp/claude-lxc-create.log 2>/dev/null || true
       exit 1
     fi
-    CT_TEMPLATE_PATH="${CT_STORAGE}:vztmpl/${CT_TEMPLATE}"
+    CT_TEMPLATE_PATH="${TMPL_STORAGE}:vztmpl/${CT_TEMPLATE}"
     ok "Template stiahnutý"
   fi
 }
