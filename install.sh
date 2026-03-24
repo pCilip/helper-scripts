@@ -103,10 +103,12 @@ detect_environment() {
   step "Detekcia prostredia"
 
   # LXC detekcia — viacero metód pre istotu
-  if grep -qa 'container=lxc' /proc/1/environ 2>/dev/null || \
-     grep -qa 'lxc' /proc/self/cgroup 2>/dev/null || \
-     [[ -f /run/systemd/container ]] && grep -qa 'lxc' /run/systemd/container 2>/dev/null || \
-     systemd-detect-virt --container 2>/dev/null | grep -q lxc; then
+  local is_lxc_detected=false
+  grep -qa 'container=lxc' /proc/1/environ 2>/dev/null && is_lxc_detected=true
+  [[ "$is_lxc_detected" == false ]] && grep -qa 'lxc' /proc/self/cgroup 2>/dev/null && is_lxc_detected=true
+  [[ "$is_lxc_detected" == false ]] && [[ -f /run/systemd/container ]] && grep -qa 'lxc' /run/systemd/container 2>/dev/null && is_lxc_detected=true
+  [[ "$is_lxc_detected" == false ]] && systemd-detect-virt --container 2>/dev/null | grep -q lxc && is_lxc_detected=true
+  if [[ "$is_lxc_detected" == true ]]; then
     IS_LXC=true
   fi
 
@@ -120,7 +122,7 @@ detect_environment() {
 
   # Nesting check — v LXC s nesting=1 funguje /sys/fs/cgroup normálne
   if [[ "$IS_LXC" == true ]]; then
-    if [[ -w /sys/fs/cgroup ]] && "$HAS_SYSTEMD"; then
+    if [[ -w /sys/fs/cgroup ]] && [[ "$HAS_SYSTEMD" == true ]]; then
       HAS_NESTING=true
     fi
   fi
@@ -745,7 +747,7 @@ setup_cron_reboot() {
   local cron_line="@reboot sleep 10 && tmux new-session -d -s claude-assistant 'bash ${STARTUP_SCRIPT}' >> ${WORKSPACE}/cron.log 2>&1"
 
   # Pridaj len ak tam ešte nie je
-  if ! crontab -l 2>/dev/null | grep -q 'claude-assistant'; then
+  if ! (crontab -l 2>/dev/null || true) | grep -q 'claude-assistant'; then
     ( crontab -l 2>/dev/null; echo "$cron_line" ) | crontab -
     ok "cron @reboot nastavenoý — asistentka sa spustí automaticky pri štarte"
   else

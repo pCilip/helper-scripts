@@ -237,8 +237,12 @@ download_template() {
     CT_TEMPLATE_PATH="${CT_STORAGE}:vztmpl/${CT_TEMPLATE}"
   else
     info "Sťahujem $CT_TEMPLATE ..."
-    if ! pveam download "$CT_STORAGE" "$CT_TEMPLATE" 2>&1 | tee -a /tmp/claude-lxc-create.log; then
-      err "Stiahnutie template zlyhalo. Pozri /tmp/claude-lxc-create.log"
+    if pveam download "$CT_STORAGE" "$CT_TEMPLATE" >> /tmp/claude-lxc-create.log 2>&1; then
+      :
+    else
+      err "Stiahnutie template zlyhalo (exit code: $?)."
+      err "Pozri log: /tmp/claude-lxc-create.log"
+      tail -5 /tmp/claude-lxc-create.log 2>/dev/null || true
       exit 1
     fi
     CT_TEMPLATE_PATH="${CT_STORAGE}:vztmpl/${CT_TEMPLATE}"
