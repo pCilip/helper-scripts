@@ -349,21 +349,22 @@ start_and_prepare() {
 
   # Počkaj na sieť
   echo -ne "  ${D}Čakám na sieť...${N}"
-  local attempts=0
-  while [[ $attempts -lt 30 ]]; do
-    if pct exec "$CT_ID" -- ping -c1 -W1 1.1.1.1 &>/dev/null 2>&1; then
-      echo -e " ${G}OK${N}"
+  local net_ok=false
+  for _ in $(seq 1 30); do
+    if pct exec "$CT_ID" -- ip route get 1.1.1.1 &>/dev/null || false; then
+      net_ok=true
       break
     fi
     sleep 2
-    attempts=$((attempts + 1))
   done
 
-  if [[ $attempts -ge 30 ]]; then
+  if [[ "$net_ok" == true ]]; then
+    echo -e " ${G}OK${N}"
+    ok "Sieť funguje"
+  else
+    echo
     warn "Sieť nie je dostupná po 60s — skontroluj manuálne."
     warn "pct exec $CT_ID -- ip addr"
-  else
-    ok "Sieť funguje"
   fi
 
   # Základné balíčky
