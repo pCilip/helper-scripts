@@ -98,34 +98,41 @@ collect_config() {
 
   # Storage pre rootfs kontajnera
   echo
-  echo -e "  ${W}Dostupné storage pooly:${N}"
-  pvesm status 2>/dev/null | awk 'NR>1 {printf "  %-15s %-10s %s\n", $1, $2, $7}' || true
+  echo -e "  ${W}Dostupné storage (rootfs):${N}"
+  while read -r TAG TYPE _ _ USED FREE _; do
+    [[ -n "$TAG" ]] || continue
+    local used_h free_h
+    used_h=$(numfmt --to=iec --from-unit=1024 --format %.1f <<<"$USED" 2>/dev/null || echo "${USED}K")
+    free_h=$(numfmt --to=iec --from-unit=1024 --format %.1f <<<"$FREE" 2>/dev/null || echo "${FREE}K")
+    echo -e "  ${G}${TAG}${N} (${TYPE}) — voľné: ${free_h}B"
+  done < <(pvesm status -content rootdir 2>/dev/null | awk 'NR>1')
   echo
-  ask "Storage pool pre rootfs kontajnera [local-lvm]:"
+  local rootdir_default
+  rootdir_default=$(pvesm status -content rootdir 2>/dev/null | awk 'NR>1{print $1; exit}') || true
+  rootdir_default="${rootdir_default:-local-lvm}"
+  ask "Storage pre rootfs [${rootdir_default}]:"
   read -r CT_STORAGE
-  CT_STORAGE="${CT_STORAGE:-local-lvm}"
+  CT_STORAGE="${CT_STORAGE:-$rootdir_default}"
 
-  # Storage pre templates (musí podporovať vztmpl — typicky 'local')
-  # Automaticky nájdi storage s podporou templates
-  TMPL_STORAGE=""
-  while IFS= read -r line; do
-    local sname stype
-    sname=$(echo "$line" | awk '{print $1}')
-    stype=$(echo "$line" | awk '{print $2}')
-    if pvesm status "$sname" 2>/dev/null | grep -q "vztmpl" || [[ "$stype" == "dir" ]]; then
-      TMPL_STORAGE="$sname"
-      break
-    fi
-  done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1, $2}')
+  # Storage pre templates (vztmpl)
+  local tmpl_count
+  tmpl_count=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1{print $1}' | wc -l) || true
 
-  # Fallback — skús 'local' (štandardný dir storage v PVE)
-  if [[ -z "$TMPL_STORAGE" ]]; then
-    TMPL_STORAGE="local"
-  fi
-
-  # Ak je CT_STORAGE rovnaký typ ako template storage, použi ho; inak použi nájdený
-  if [[ "$CT_STORAGE" != "$TMPL_STORAGE" ]]; then
-    info "Templates budú stiahnuté do: $TMPL_STORAGE (rootfs: $CT_STORAGE)"
+  if [[ "$tmpl_count" -le 1 ]]; then
+    # Jeden alebo žiadny — automatický výber
+    TMPL_STORAGE=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1{print $1; exit}') || true
+    TMPL_STORAGE="${TMPL_STORAGE:-local}"
+    info "Template storage: $TMPL_STORAGE (auto)"
+  else
+    echo
+    echo -e "  ${W}Dostupné storage (templates):${N}"
+    pvesm status -content vztmpl 2>/dev/null | awk 'NR>1{printf "  %s (%s)\n", $1, $2}'
+    echo
+    local tmpl_default
+    tmpl_default=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1{print $1; exit}')
+    ask "Storage pre templates [${tmpl_default}]:"
+    read -r TMPL_STORAGE
+    TMPL_STORAGE="${TMPL_STORAGE:-$tmpl_default}"
   fi
 
   # Sieť
