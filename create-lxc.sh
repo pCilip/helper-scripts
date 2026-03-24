@@ -209,13 +209,13 @@ download_template() {
   # Nájdi presný názov súboru template
   local full_tmpl
   full_tmpl=$(pveam available --section system 2>/dev/null | \
-    grep "$TMPL_NAME" | head -1 | awk '{print $2}' || echo "")
+    grep "$TMPL_NAME" | head -1 | awk '{print $2}') || true
 
   if [[ -z "$full_tmpl" ]]; then
     # Fallback — skús všetky
     pveam update >> /tmp/claude-lxc-create.log 2>&1 || true
     full_tmpl=$(pveam available --section system 2>/dev/null | \
-      grep "$TMPL_NAME" | head -1 | awk '{print $2}' || echo "")
+      grep "$TMPL_NAME" | head -1 | awk '{print $2}') || true
   fi
 
   if [[ -z "$full_tmpl" ]]; then
@@ -230,15 +230,17 @@ download_template() {
 
   # Skontroluj či je template už stiahnutý
   local tmpl_file
-  tmpl_file=$(pveam list "$CT_STORAGE" 2>/dev/null | grep "${CT_TEMPLATE%%_*}" | awk '{print $1}' | head -1 || echo "")
+  tmpl_file=$(pveam list "$CT_STORAGE" 2>/dev/null | grep "${CT_TEMPLATE%%_*}" | awk '{print $1}' | head -1) || true
 
   if [[ -n "$tmpl_file" ]]; then
     ok "Template už existuje: $tmpl_file"
     CT_TEMPLATE_PATH="${CT_STORAGE}:vztmpl/${CT_TEMPLATE}"
   else
-    echo -ne "  ${D}Sťahujem $CT_TEMPLATE...${N}"
-    pveam download "$CT_STORAGE" "$CT_TEMPLATE" >> /tmp/claude-lxc-create.log 2>&1
-    echo -e " ${G}hotovo${N}"
+    info "Sťahujem $CT_TEMPLATE ..."
+    if ! pveam download "$CT_STORAGE" "$CT_TEMPLATE" 2>&1 | tee -a /tmp/claude-lxc-create.log; then
+      err "Stiahnutie template zlyhalo. Pozri /tmp/claude-lxc-create.log"
+      exit 1
+    fi
     CT_TEMPLATE_PATH="${CT_STORAGE}:vztmpl/${CT_TEMPLATE}"
     ok "Template stiahnutý"
   fi
