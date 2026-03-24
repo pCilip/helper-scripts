@@ -8,7 +8,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────
 
 VERSION="1.0.0"
-INSTALL_URL="https://raw.githubusercontent.com/TVOJ_REPO/main/install.sh"
+INSTALL_URL="https://raw.githubusercontent.com/pCilip/helper-scripts/main/install.sh"
 
 # ── Farby ──────────────────────────────────────────────
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
