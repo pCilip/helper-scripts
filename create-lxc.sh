@@ -356,7 +356,7 @@ start_and_prepare() {
       break
     fi
     sleep 2
-    ((attempts++))
+    attempts=$((attempts + 1))
   done
 
   if [[ $attempts -ge 30 ]]; then
