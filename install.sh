@@ -2,23 +2,17 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────
-#  Claude Assistant Installer
-#  Inštalátor osobnej AI asistentky na báze Claude Code
-#  Štýl: PVE Community Scripts
+#  Claude Assistant Installer v2
+#  Osobná AI asistentka — Telegram bridge + Claude Code
+#  Beží ako user 'claude', nie root
 # ─────────────────────────────────────────────────────────
 
-VERSION="1.0.0"
-WORKSPACE="$HOME/.claude-assistant"
-LOG="$WORKSPACE/install.log"
-CLAUDE_MD="$WORKSPACE/CLAUDE.md"
-ENV_FILE="$WORKSPACE/.env"
-STARTUP_SCRIPT="$WORKSPACE/start.sh"
-SERVICE_FILE="/etc/systemd/system/claude-assistant.service"
-
-# Detekcia prostredia — nastavené v detect_environment()
-IS_LXC=false
-HAS_SYSTEMD=false
-HAS_NESTING=false
+VERSION="2.0.0"
+CLAUDE_USER="claude"
+CLAUDE_HOME="/home/${CLAUDE_USER}"
+WORKSPACE="${CLAUDE_HOME}/.claude"
+LOG="/tmp/claude-assistant-install.log"
+REPO_URL="https://raw.githubusercontent.com/pCilip/helper-scripts/main"
 
 # ── Farby ──────────────────────────────────────────────
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
@@ -30,35 +24,22 @@ header() {
   clear
   echo -e "${C}${BOLD}"
   echo "  ╔══════════════════════════════════════════════════╗"
-  echo "  ║        Claude Assistant Installer v${VERSION}        ║"
-  echo "  ║   Osobná AI asistentka — email, faktúry, Telegram ║"
+  echo "  ║      Claude Assistant Installer v${VERSION}         ║"
+  echo "  ║   Osobná AI asistentka — Telegram + Claude Code  ║"
   echo "  ╚══════════════════════════════════════════════════╝"
   echo -e "${N}"
 }
 
-step() {
-  echo -e "\n${B}${BOLD}▶ $1${N}"
-}
+step()  { echo -e "\n${B}${BOLD}▶ $1${N}"; }
+ok()    { echo -e "  ${G}✓${N} $1"; }
+warn()  { echo -e "  ${Y}⚠${N}  $1"; }
+err()   { echo -e "  ${R}✗${N} $1" >&2; }
+info()  { echo -e "  ${D}$1${N}"; }
+ask()   { echo -ne "\n  ${W}$1${N} "; }
+divider() { echo -e "  ${D}──────────────────────────────────────────────────${N}"; }
 
-ok() {
-  echo -e "  ${G}✓${N} $1"
-}
-
-warn() {
-  echo -e "  ${Y}⚠${N}  $1"
-}
-
-err() {
-  echo -e "  ${R}✗${N} $1" >&2
-}
-
-info() {
-  echo -e "  ${D}$1${N}"
-}
-
-ask() {
-  echo -ne "\n  ${W}$1${N} "
-}
+progress() { echo -ne "  ${D}${1}...${N}"; }
+done_progress() { echo -e " ${G}hotovo${N}"; }
 
 ask_secret() {
   echo -ne "\n  ${W}$1${N} "
@@ -67,359 +48,258 @@ ask_secret() {
   echo "$REPLY"
 }
 
-divider() {
-  echo -e "  ${D}──────────────────────────────────────────────────${N}"
-}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
-progress() {
-  local msg="$1"
-  echo -ne "  ${D}${msg}...${N}"
-}
-
-done_progress() {
-  echo -e " ${G}hotovo${N}"
-}
-
-pause() {
-  echo -e "\n  ${D}Stlač Enter pre pokračovanie...${N}"
-  read -r
-}
-
-require_root_or_sudo() {
-  if [[ $EUID -ne 0 ]] && ! sudo -n true 2>/dev/null; then
-    warn "Niektoré kroky vyžadujú sudo prístup."
-    info "Budeš vyzvaný na heslo kde je to potrebné."
-  fi
-}
-
-log() {
-  mkdir -p "$WORKSPACE"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"
-}
-
-# ── Kontroly prerekvizít ───────────────────────────────
 # ── Detekcia prostredia ───────────────────────────────
 detect_environment() {
   step "Detekcia prostredia"
 
-  # LXC detekcia — viacero metód pre istotu
-  local is_lxc_detected=false
-  grep -qa 'container=lxc' /proc/1/environ 2>/dev/null && is_lxc_detected=true
-  [[ "$is_lxc_detected" == false ]] && grep -qa 'lxc' /proc/self/cgroup 2>/dev/null && is_lxc_detected=true
-  [[ "$is_lxc_detected" == false ]] && [[ -f /run/systemd/container ]] && grep -qa 'lxc' /run/systemd/container 2>/dev/null && is_lxc_detected=true
-  [[ "$is_lxc_detected" == false ]] && systemd-detect-virt --container 2>/dev/null | grep -q lxc && is_lxc_detected=true
-  if [[ "$is_lxc_detected" == true ]]; then
-    IS_LXC=true
-  fi
+  local is_lxc=false
+  grep -qa 'container=lxc' /proc/1/environ 2>/dev/null && is_lxc=true
+  [[ "$is_lxc" == false ]] && grep -qa 'lxc' /proc/self/cgroup 2>/dev/null && is_lxc=true
+  [[ "$is_lxc" == false ]] && [[ -f /run/systemd/container ]] && grep -qa 'lxc' /run/systemd/container 2>/dev/null && is_lxc=true
+  [[ "$is_lxc" == false ]] && systemd-detect-virt --container 2>/dev/null | grep -q lxc && is_lxc=true
 
-  # Systemd funkčnosť
-  if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null 2>&1; then
-    HAS_SYSTEMD=true
-  elif command -v systemctl &>/dev/null && \
-       systemctl list-units --type=service &>/dev/null 2>&1; then
-    HAS_SYSTEMD=true
-  fi
-
-  # Nesting check — v LXC s nesting=1 funguje /sys/fs/cgroup normálne
-  if [[ "$IS_LXC" == true ]]; then
-    if [[ -w /sys/fs/cgroup ]] && [[ "$HAS_SYSTEMD" == true ]]; then
-      HAS_NESTING=true
-    fi
-  fi
-
-  # Výstup
-  if [[ "$IS_LXC" == true ]]; then
-    ok "Prostredie: Proxmox LXC kontajner"
-    if [[ "$HAS_SYSTEMD" == true ]]; then
-      ok "systemd: funkčný (nesting povolený)"
-      HAS_NESTING=true
-    else
-      warn "systemd: nefunkčný — použijem tmux + cron"
-      info "Pre systemd support: v Proxmox → kontajner → Options → Features → Nesting ✓"
-    fi
+  if [[ "$is_lxc" == true ]]; then
+    ok "Prostredie: LXC kontajner"
   else
-    ok "Prostredie: štandardný VPS / VM"
-    if [[ "$HAS_SYSTEMD" == true ]]; then
-      ok "systemd: dostupný"
-    else
-      warn "systemd: nedostupný — použijem tmux"
-    fi
+    ok "Prostredie: VPS / VM"
   fi
 
-  log "IS_LXC=$IS_LXC HAS_SYSTEMD=$HAS_SYSTEMD HAS_NESTING=$HAS_NESTING"
-}
-
-check_os() {
-  step "Kontrola operačného systému"
   if [[ -f /etc/os-release ]]; then
     . /etc/os-release
-    ok "Detekovaný: $PRETTY_NAME"
-    case "$ID" in
-      ubuntu|debian|linuxmint) ok "Podporovaná distribúcia" ;;
-      *)
-        warn "Netestovaná distribúcia: $ID"
-        info "Pokračujem, ale niektoré kroky môžu zlyhať."
-        ;;
-    esac
-  else
-    warn "Nepodarilo sa zistiť OS. Pokračujem..."
+    ok "OS: $PRETTY_NAME"
   fi
-  log "OS: ${PRETTY_NAME:-neznámy}"
+
+  log "LXC=$is_lxc OS=${PRETTY_NAME:-unknown}"
 }
 
 check_internet() {
-  step "Kontrola internetového pripojenia"
+  step "Kontrola internetu"
   if curl -s --max-time 5 https://api.anthropic.com > /dev/null 2>&1; then
-    ok "Pripojenie na Anthropic API: OK"
+    ok "Internet OK"
   else
-    err "Žiadne internetové pripojenie alebo Anthropic API nedostupné."
-    echo -e "\n  ${R}Inštalácia vyžaduje internet. Skontroluj pripojenie.${N}"
+    err "Žiadne internetové pripojenie."
     exit 1
   fi
 }
 
-# ── Inštalácia závislostí ─────────────────────────────
+# ── Systémové závislosti ──────────────────────────────
 install_deps() {
-  step "Inštalácia systémových závislostí"
+  step "Systémové závislosti"
+
+  # Timezone
+  ln -sf /usr/share/zoneinfo/Europe/Prague /etc/localtime
+  echo "Europe/Prague" > /etc/timezone
+  ok "Timezone: Europe/Prague ($(date +%Z))"
 
   progress "Aktualizácia balíčkov"
-  sudo apt-get update -qq >> "$LOG" 2>&1
+  apt-get update -qq >> "$LOG" 2>&1
   done_progress
 
-  for pkg in curl git tmux unzip jq; do
-    if command -v "$pkg" &>/dev/null; then
-      ok "$pkg — už nainštalovaný"
+  for pkg in curl git tmux unzip jq python3 sudo openssh-server; do
+    if command -v "$pkg" &>/dev/null || dpkg -l "$pkg" &>/dev/null 2>&1; then
+      ok "$pkg — OK"
     else
       progress "Inštalácia $pkg"
-      sudo apt-get install -y -qq "$pkg" >> "$LOG" 2>&1
+      apt-get install -y -qq "$pkg" >> "$LOG" 2>&1
       done_progress
-      ok "$pkg nainštalovaný"
     fi
   done
 }
 
+# ── Vytvorenie claude usera ───────────────────────────
+create_claude_user() {
+  step "Užívateľ '${CLAUDE_USER}'"
+
+  if id "$CLAUDE_USER" &>/dev/null; then
+    ok "Užívateľ už existuje"
+  else
+    useradd -m -s /bin/bash "$CLAUDE_USER"
+    ok "Užívateľ vytvorený"
+  fi
+
+  # Heslo
+  ask "Nastav heslo pre usera '${CLAUDE_USER}' (pre SSH prístup):"
+  read -rs user_pass
+  echo
+  if [[ -n "$user_pass" ]]; then
+    echo "${CLAUDE_USER}:${user_pass}" | chpasswd
+    ok "Heslo nastavené"
+  fi
+
+  # SSH
+  sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true
+  systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+
+  mkdir -p "$WORKSPACE" "${WORKSPACE}/gws" "${WORKSPACE}/channels/telegram" "${WORKSPACE}/inbox"
+  chown -R "${CLAUDE_USER}:${CLAUDE_USER}" "$CLAUDE_HOME"
+}
+
+# ── Node.js ───────────────────────────────────────────
 install_node() {
   step "Node.js 20+"
 
   if command -v node &>/dev/null; then
-    local ver
+    local ver major
     ver=$(node --version)
-    local major=${ver#v}; major=${major%%.*}
+    major=${ver#v}; major=${major%%.*}
     if [[ $major -ge 20 ]]; then
-      ok "Node.js $ver — vyhovuje"
+      ok "Node.js $ver — OK"
       return
-    else
-      warn "Node.js $ver — príliš stará verzia, inštalujem 20.x"
     fi
   fi
 
-  progress "Sťahovanie NodeSource repozitára"
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - >> "$LOG" 2>&1
-  done_progress
-
   progress "Inštalácia Node.js 20"
-  sudo apt-get install -y -qq nodejs >> "$LOG" 2>&1
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >> "$LOG" 2>&1
+  apt-get install -y -qq nodejs >> "$LOG" 2>&1
   done_progress
-
-  ok "Node.js $(node --version) nainštalovaný"
+  ok "Node.js $(node --version)"
 }
 
+# ── Bun ───────────────────────────────────────────────
 install_bun() {
-  step "Bun runtime (vyžaduje Claude Code Channels)"
+  step "Bun runtime"
 
-  if command -v bun &>/dev/null; then
-    ok "Bun $(bun --version) — už nainštalovaný"
-    return
-  fi
-
-  progress "Inštalácia Bun"
-  curl -fsSL https://bun.sh/install | bash >> "$LOG" 2>&1
-
-  # Pridaj do PATH pre aktuálnu session
-  export BUN_INSTALL="$HOME/.bun"
-  export PATH="$BUN_INSTALL/bin:$PATH"
-
-  if command -v bun &>/dev/null; then
-    ok "Bun $(bun --version) nainštalovaný"
+  if [[ -f "${CLAUDE_HOME}/.bun/bin/bun" ]]; then
+    ok "Bun — už nainštalovaný"
   else
-    warn "Bun sa nenašiel v PATH. Restartuj terminál ak treba."
+    progress "Inštalácia Bun (ako ${CLAUDE_USER})"
+    su - "$CLAUDE_USER" -c 'curl -fsSL https://bun.sh/install | bash' >> "$LOG" 2>&1
+    done_progress
   fi
 
-  # Pridaj do .bashrc ak tam ešte nie je
-  if ! grep -q 'BUN_INSTALL' "$HOME/.bashrc" 2>/dev/null; then
-    {
-      echo ''
-      echo '# Bun'
-      echo 'export BUN_INSTALL="$HOME/.bun"'
-      echo 'export PATH="$BUN_INSTALL/bin:$PATH"'
-    } >> "$HOME/.bashrc"
-  fi
+  # Symlink do global PATH
+  ln -sf "${CLAUDE_HOME}/.bun/bin/bun" /usr/local/bin/bun
+  ok "Bun dostupný globálne: $(bun --version 2>/dev/null || echo 'OK')"
 }
 
+# ── Claude Code ───────────────────────────────────────
 install_claude_code() {
   step "Claude Code"
 
   if command -v claude &>/dev/null; then
-    local ver
-    ver=$(claude --version 2>/dev/null || echo "neznáma")
-    ok "Claude Code $ver — už nainštalovaný"
+    ok "Claude Code $(claude --version 2>/dev/null) — OK"
   else
-    progress "Inštalácia Claude Code (npm global)"
+    progress "Inštalácia Claude Code"
     npm install -g @anthropic-ai/claude-code >> "$LOG" 2>&1
     done_progress
-    ok "Claude Code $(claude --version 2>/dev/null || echo 'nainštalovaný')"
+    ok "Claude Code nainštalovaný"
   fi
+}
+
+# ── Google Cloud + gws CLI ────────────────────────────
+install_gcloud() {
+  step "Google Cloud CLI"
+
+  if command -v gcloud &>/dev/null; then
+    ok "gcloud — už nainštalovaný"
+    return
+  fi
+
+  progress "Sťahovanie gcloud CLI"
+  curl -fsSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz | \
+    tar -xz -C /opt >> "$LOG" 2>&1
+  done_progress
+
+  progress "Inštalácia"
+  /opt/google-cloud-sdk/install.sh --quiet >> "$LOG" 2>&1
+  done_progress
+
+  source /opt/google-cloud-sdk/path.bash.inc 2>/dev/null || true
+  if ! grep -q 'google-cloud-sdk' "${CLAUDE_HOME}/.bashrc" 2>/dev/null; then
+    echo 'source /opt/google-cloud-sdk/path.bash.inc' >> "${CLAUDE_HOME}/.bashrc"
+  fi
+  ok "gcloud CLI nainštalovaný"
 }
 
 install_gws() {
   step "Google Workspace CLI (gws)"
-  info "Umožní čítanie Gmailu a Kalendára cez MCP"
+
+  install_gcloud
 
   if command -v gws &>/dev/null; then
     ok "gws — už nainštalovaný"
-    return
+  else
+    progress "Inštalácia gws"
+    npm install -g @googleworkspace/cli >> "$LOG" 2>&1
+    done_progress
+    ok "gws nainštalovaný"
   fi
-
-  progress "Inštalácia @googleworkspace/cli"
-  npm install -g @googleworkspace/cli >> "$LOG" 2>&1
-  done_progress
-  ok "gws nainštalovaný"
 }
 
-# ── Claude Code autentifikácia ─────────────────────────
-setup_claude_auth() {
-  step "Claude Code autentifikácia"
-  divider
-
-  # Skontroluj či už je autentifikovaný
-  if claude --version &>/dev/null && \
-     [[ -f "$HOME/.claude.json" ]] && \
-     grep -q '"accessToken"' "$HOME/.claude.json" 2>/dev/null; then
-    ok "Claude Code je už autentifikovaný"
-    return
-  fi
-
-  echo
-  echo -e "  ${W}Metóda autentifikácie:${N}"
-  echo -e "  ${G}1)${N} OAuth (claude.ai Pro/Max) — odporúčané"
-  echo -e "  ${G}2)${N} API kľúč (ANTHROPIC_API_KEY)"
-  echo
-  ask "Vyber možnosť [1/2]:"
-  read -r auth_choice
-
-  case "${auth_choice:-1}" in
-    1)
-      echo
-      echo -e "  ${Y}Headless OAuth postup:${N}"
-      divider
-      info "1. Na tomto VPS spusti:  claude"
-      info "2. Zobrazí sa URL — skopíruj ju"
-      info "3. Otvor URL v prehliadači (mobil / iný PC)"
-      info "4. Prihlás sa na claude.ai"
-      info "5. Sem zadaj OAuth token ktorý dostaneš"
-      divider
-      echo
-      echo -e "  ${D}Alebo ak máš prístup k prehliadaču na tomto stroji,${N}"
-      echo -e "  ${D}jednoducho spusti: ${W}claude${D} a postupuj podľa inštrukcií.${N}"
-      echo
-      ask "Stlač Enter keď si pripravený spustiť 'claude' pre autentifikáciu..."
-      read -r
-
-      echo
-      warn "Spúšťam claude pre autentifikáciu. Po dokončení sa vráť sem."
-      echo -e "  ${D}(Ak sa spýta na niečo, odpovedz a potom Ctrl+C pre návrat)${N}"
-      echo
-      # Spustí claude raz pre autentifikáciu
-      claude --version || true
-      echo
-      ask "Je autentifikácia dokončená? [y/n]:"
-      read -r done_auth
-      if [[ "$done_auth" =~ ^[Yy]$ ]]; then
-        ok "Claude Code autentifikovaný"
-      else
-        warn "Autentifikácia nedokončená — môžeš pokračovať a autentifikovať neskôr"
-        warn "Spusti: claude"
-      fi
-      ;;
-    2)
-      echo
-      local api_key
-      api_key=$(ask_secret "Vlož ANTHROPIC_API_KEY:")
-      if [[ -n "$api_key" ]]; then
-        mkdir -p "$WORKSPACE"
-        # Pridaj do .env
-        grep -v 'ANTHROPIC_API_KEY' "$ENV_FILE" 2>/dev/null > /tmp/env_tmp || true
-        echo "ANTHROPIC_API_KEY=$api_key" >> /tmp/env_tmp
-        mv /tmp/env_tmp "$ENV_FILE"
-        chmod 600 "$ENV_FILE"
-        export ANTHROPIC_API_KEY="$api_key"
-        ok "API kľúč uložený do $ENV_FILE"
-      fi
-      ;;
-  esac
-}
-
-# ── Google Workspace setup ─────────────────────────────
-setup_google_workspace() {
-  step "Google Workspace (Gmail + Kalendár)"
+# ── Google Workspace auth (headless) ──────────────────
+setup_google_auth() {
+  step "Google Workspace autentifikácia"
   divider
 
   echo
   echo -e "  ${W}Chceš nastaviť Gmail a Kalendár?${N}"
-  echo -e "  ${D}(Umožní asistentke čítať maily, sledovať termíny)${N}"
+  info "(gws vyžaduje OAuth token z PC s browserom)"
   echo
   ask "Nastaviť Google Workspace? [y/n]:"
   read -r gws_choice
 
   if [[ ! "$gws_choice" =~ ^[Yy]$ ]]; then
-    warn "Preskakujem — môžeš nastaviť neskôr cez: gws auth setup"
+    warn "Preskakujem — nastav neskôr"
     return
   fi
 
   echo
-  echo -e "  ${Y}Čo budeš potrebovať:${N}"
+  echo -e "  ${Y}Headless postup — spusti na PC s browserom:${N}"
   divider
-  info "1. Google Cloud Console projekt s povolenými Gmail + Calendar API"
-  info "2. OAuth2 credentials (credentials.json)"
-  info "   → console.cloud.google.com → APIs & Services → Credentials"
-  info "   → Create OAuth Client → Desktop App → stiahnuť JSON"
-  info "3. Seba ako Test User (External OAuth consent screen)"
+  info "1. npm install -g @googleworkspace/cli"
+  info "2. gws auth login"
+  info "3. gws auth export --unmasked > gws-token.json"
+  info "4. Skopíruj gws-token.json na tento server"
   divider
   echo
-  echo -e "  ${D}Viac info: https://docs.anthropic.com/gws-setup${N}"
-  echo
 
-  ask "Máš credentials.json? Zadaj cestu (Enter = preskočiť):"
-  read -r creds_path
+  ask "Cesta k gws-token.json (alebo Enter = preskočiť):"
+  read -r token_path
 
-  if [[ -n "$creds_path" && -f "$creds_path" ]]; then
-    mkdir -p "$WORKSPACE/gws"
-    cp "$creds_path" "$WORKSPACE/gws/credentials.json"
-    ok "credentials.json skopírovaný"
+  if [[ -n "$token_path" && -f "$token_path" ]]; then
+    cp "$token_path" "${WORKSPACE}/gws/gws-token.json"
+    chmod 600 "${WORKSPACE}/gws/gws-token.json"
+    chown "${CLAUDE_USER}:${CLAUDE_USER}" "${WORKSPACE}/gws/gws-token.json"
 
-    echo
-    info "Spúšťam Google OAuth flow..."
-    info "Otvor URL ktorá sa zobrazí v prehliadači."
-    echo
-
-    export GOOGLE_OAUTH_CREDENTIALS="$WORKSPACE/gws/credentials.json"
-    gws auth setup --credentials "$WORKSPACE/gws/credentials.json" || \
-      warn "OAuth flow prerušený — dokonči neskôr cez: gws auth setup"
-
-    # Pridaj MCP server do Claude Code
-    progress "Registrácia gws MCP servera"
-    claude mcp add --transport http gws-workspace http://localhost:3000 >> "$LOG" 2>&1 || \
-      warn "MCP registrácia neskôr: claude mcp add gws-workspace ..."
-    done_progress
-
-    ok "Google Workspace nakonfigurovaný"
+    # Pridaj do .env
+    cat >> "${WORKSPACE}/.env" << EOF
+GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=${WORKSPACE}/gws/gws-token.json
+GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+EOF
+    ok "Google Workspace token nakonfigurovaný"
   else
-    warn "Preskakujem Google Workspace — nastav neskôr"
-    info "Spusti: gws auth setup"
+    warn "Preskakujem — nastav neskôr"
+    info "Skopíruj gws-token.json do: ${WORKSPACE}/gws/"
   fi
 }
 
-# ── Telegram setup ────────────────────────────────────
+# ── Claude Code auth ──────────────────────────────────
+setup_claude_auth() {
+  step "Claude Code prihlásenie"
+  divider
+
+  echo
+  info "Claude Code vyžaduje prihlásenie cez claude.ai"
+  info "Spustím 'claude' ako user '${CLAUDE_USER}' — postupuj podľa inštrukcií."
+  echo
+  ask "Stlač Enter pre spustenie prihlasovania..."
+  read -r
+
+  su - "$CLAUDE_USER" -c "claude" || true
+
+  echo
+  ask "Prihlásenie úspešné? [y/n]:"
+  read -r auth_ok
+  if [[ "$auth_ok" =~ ^[Yy]$ ]]; then
+    ok "Claude Code prihlásený"
+  else
+    warn "Dokonči prihlásenie neskôr: su - ${CLAUDE_USER} -c 'claude'"
+  fi
+}
+
+# ── Telegram ──────────────────────────────────────────
 setup_telegram() {
   step "Telegram bot"
   divider
@@ -427,470 +307,234 @@ setup_telegram() {
   echo
   echo -e "  ${Y}Ako získaš Telegram bot token:${N}"
   divider
-  info "1. Otvor Telegram → vyhľadaj @BotFather"
-  info "2. Pošli: /newbot"
-  info "3. Zadaj meno bota (napr. MojaAsistentka)"
-  info "4. Zadaj username (musí končiť na 'bot', napr. moja_asistentka_bot)"
-  info "5. BotFather ti pošle TOKEN — skopíruj ho"
+  info "1. Telegram → @BotFather → /newbot"
+  info "2. Zadaj meno a username bota"
+  info "3. Skopíruj TOKEN"
   divider
   echo
 
   local tg_token
-  tg_token=$(ask_secret "Vlož Telegram Bot Token (alebo Enter = preskočiť):")
+  tg_token=$(ask_secret "Telegram Bot Token (Enter = preskočiť):")
 
   if [[ -z "$tg_token" ]]; then
-    warn "Preskakujem Telegram — nastav neskôr"
-    info "Spusti: /plugin install telegram@claude-plugins-official"
-    info "Potom: /telegram:configure YOUR_TOKEN"
+    warn "Preskakujem Telegram"
     return
   fi
 
-  # Ulož token
-  mkdir -p "$WORKSPACE"
-  grep -v 'TELEGRAM_BOT_TOKEN' "$ENV_FILE" 2>/dev/null > /tmp/env_tmp || true
-  echo "TELEGRAM_BOT_TOKEN=$tg_token" >> /tmp/env_tmp
-  mv /tmp/env_tmp "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
-
-  ok "Token uložený"
-
-  # Inštalácia pluginu
-  progress "Inštalácia Telegram pluginu do Claude Code"
-  # Plugin install je interaktívny, robíme to cez --print mode
-  echo "/plugin install telegram@claude-plugins-official" | \
-    claude --dangerously-skip-permissions -p "install telegram plugin" >> "$LOG" 2>&1 || true
-  done_progress
-
-  # Konfigurácia tokenu
-  progress "Konfigurácia Telegram tokenu"
-  echo "/telegram:configure $tg_token" | \
-    claude --dangerously-skip-permissions -p "configure telegram" >> "$LOG" 2>&1 || true
-  done_progress
-
-  ok "Telegram plugin nakonfigurovaný"
+  echo "TELEGRAM_BOT_TOKEN=${tg_token}" >> "${WORKSPACE}/.env"
 
   echo
-  echo -e "  ${W}Párovanie:${N}"
-  info "Keď spustíš asistentku, pošli správu svojmu botu v Telegrame."
-  info "Bot ti pošle pairing kód — zadaj ho v termináli:"
-  info "  /telegram:access pair KOD"
-  info "Potom nastav allowlist:"
-  info "  /telegram:access policy allowlist"
+  info "Teraz pošli botovi správu na Telegrame a spusti:"
+  info "  curl -s 'https://api.telegram.org/bot${tg_token}/getUpdates' | python3 -m json.tool"
+  info "Nájdi tam svoje chat ID (číslo v chat.id)"
+  echo
+  ask "Tvoje Telegram Chat ID:"
+  read -r chat_id
+
+  if [[ -n "$chat_id" ]]; then
+    echo "TELEGRAM_CHAT_ID=${chat_id}" >> "${WORKSPACE}/.env"
+    ok "Telegram nakonfigurovaný (token + chat ID)"
+
+    # Token pre channels plugin (keby v budúcnosti fungoval)
+    echo "TELEGRAM_BOT_TOKEN=${tg_token}" > "${WORKSPACE}/channels/telegram/.env"
+    chmod 600 "${WORKSPACE}/channels/telegram/.env"
+  else
+    warn "Chat ID chýba — doplň neskôr do ${WORKSPACE}/.env"
+  fi
+}
+
+# ── Stiahnutie súborov z repa ─────────────────────────
+download_files() {
+  step "Sťahovanie súborov"
+
+  local files=("files/telegram-bridge.py" "files/start.sh" "files/settings.json" "files/CLAUDE.md.template")
+  for f in "${files[@]}"; do
+    local dest="${WORKSPACE}/$(basename "$f" .template)"
+    progress "$(basename "$f")"
+    if curl -fsSL "${REPO_URL}/${f}" -o "$dest" 2>/dev/null; then
+      done_progress
+    else
+      err "Nepodarilo sa stiahnuť $f"
+    fi
+  done
+
+  chmod +x "${WORKSPACE}/telegram-bridge.py" "${WORKSPACE}/start.sh"
 }
 
 # ── CLAUDE.md generovanie ─────────────────────────────
 generate_claude_md() {
-  step "Konfigurácia asistentky (CLAUDE.md)"
-  divider
+  step "Konfigurácia asistentky"
 
-  echo
-  echo -e "  ${D}Pár otázok pre prispôsobenie asistentky:${N}"
-  echo
-
-  ask "Ako sa volá asistentka? (napr. Eva, Jana, AI):"
+  ask "Meno asistentky [Asistentka]:"
   read -r assistant_name
   assistant_name="${assistant_name:-Asistentka}"
 
-  ask "Tvoje meno / ako sa má asistentka obracať na teba:"
+  ask "Tvoje meno [Peťo]:"
   read -r user_name
-  user_name="${user_name:-šéfe}"
+  user_name="${user_name:-Peťo}"
 
-  ask "Jazyk odpovedí [sk/en] (default: sk):"
+  ask "Jazyk [slovenčine]:"
   read -r lang
-  lang="${lang:-sk}"
+  lang="${lang:-slovenčine}"
 
-  echo
-  echo -e "  ${W}Čo chceš aby asistentka robila? (viac možností, Enter = všetko)${N}"
-  echo -e "  ${G}1)${N} Čítanie a triediaenie emailov"
-  echo -e "  ${G}2)${N} Sledovanie faktúr a expirácií"
-  echo -e "  ${G}3)${N} Kalendár a pripomienky"
-  echo -e "  ${G}4)${N} Ranný brief"
-  echo -e "  ${G}5)${N} Všetko vyššie"
-  echo
-  ask "Vyber [1-5] alebo viac čísel oddelených čiarkou:"
-  read -r features_choice
-  features_choice="${features_choice:-5}"
+  # Nahradenie premenných v template
+  if [[ -f "${WORKSPACE}/CLAUDE.md.template" ]]; then
+    sed -e "s|{{ASSISTANT_NAME}}|${assistant_name}|g" \
+        -e "s|{{USER_NAME}}|${user_name}|g" \
+        -e "s|{{LANG}}|${lang}|g" \
+        "${WORKSPACE}/CLAUDE.md.template" > "${WORKSPACE}/CLAUDE.md"
+    rm -f "${WORKSPACE}/CLAUDE.md.template"
+  fi
 
-  mkdir -p "$WORKSPACE"
+  # Aktualizuj bridge prefix
+  sed -i "s|Telegram od Peťa|Telegram od ${user_name}|g" "${WORKSPACE}/telegram-bridge.py" 2>/dev/null || true
 
-  cat > "$CLAUDE_MD" << HEREDOC
-# ${assistant_name} — Osobná AI asistentka
-
-Volám sa **${assistant_name}**. Som tvoja osobná asistentka.
-Obracaj sa na mňa v ${lang} jazyku. Na teba sa obraciam: ${user_name}.
-
-## Základné pravidlá
-
-- Odpovedám vždy v **${lang}** jazyku
-- Som stručná a vecná — žiadne zbytočné formality
-- Dôverné informácie (heslá, tokeny) nikdy neposielam cez Telegram
-- Pred každou akciou s nezvratným dopadom (platba, mazanie, odoslanie emailu) sa opýtam
-
-## Štruktúra workspace
-
-\`\`\`
-${WORKSPACE}/
-├── CLAUDE.md          ← tieto inštrukcie
-├── .env               ← credentials (nikdy necommitovať)
-├── expirations.md     ← faktúry a expirácie
-├── notes.md           ← moje poznámky
-└── inbox/             ← prijaté súbory z Telegramu
-\`\`\`
-
-## Expirácie a faktúry
-
-Súbor \`${WORKSPACE}/expirations.md\` obsahuje tabuľku sledovaných termínov:
-
-| Popis | Dátum splatnosti | Suma | Status | Poznámka |
-|-------|-----------------|------|--------|----------|
-
-### Automatické pravidlá
-- Keď nájdeš v emaili faktúru → extrahuj dátum a sumu → pridaj do expirations.md
-- **30 dní pred splatnosťou** → upozornenie cez Telegram
-- **7 dní pred splatnosťou** → urgentné upozornenie
-- **V deň splatnosti** → pripomenutie ráno
-
-## Ranný brief (každý deň o 7:30)
-
-Zostaví prehľad a pošle na Telegram:
-1. Dôležité emaily (nie newslettery, nie reklamy)
-2. Dnešné a zajtrajšie udalosti z Kalendára
-3. Faktúry a expirácie splatné do 30 dní
-4. Prípadné urgentné veci
-
-Formát: krátky, štruktúrovaný, max 10 riadkov
-
-## Email pravidlá
-
-### Automaticky ignorujem:
-- Newslettery, marketing, promo
-- Notifikácie zo sociálnych sietí
-- Automated CI/CD správy
-
-### Vždy hlásim:
-- Faktúry a platobné výzvy
-- Zmluvy a dokumenty na podpis
-- Správy od konkrétnych ľudí (nie boty)
-- Urgentné veci so slovami: urgent, ASAP, dôležité, deadline
-
-## Čo robím sama (bez pytania):
-- Čítam emaily a Kalendár
-- Pridávam záznamy do expirations.md
-- Posielam ranný brief
-- Odpovedám na otázky cez Telegram
-- Sťahujem prijaté súbory do ${WORKSPACE}/inbox/
-
-## Čo vždy konzultujem s tebou:
-- Odoslanie akéhokoľvek emailu
-- Platba alebo potvrdenie faktúry
-- Mazanie súborov
-- Akákoľvek akcia v mene teba voči tretím stranám
-
-## Telegram príkazy
-
-- \`brief\` alebo \`správa\` → okamžitý ranný brief
-- \`faktúry\` alebo \`expirácie\` → zoznam splatných termínov
-- \`email\` → zhrnutie nových emailov
-- \`dnes\` → dnešný kalendár
-- \`stav\` → stav systému (posledná aktivita, naplánované úlohy)
-HEREDOC
-
-  ok "CLAUDE.md vygenerovaný: $CLAUDE_MD"
+  ok "CLAUDE.md vygenerovaný pre ${assistant_name}"
 }
 
-# ── Startup script ─────────────────────────────────────
-create_startup_script() {
-  step "Startup script"
+# ── Claude Code nastavenia ────────────────────────────
+setup_claude_settings() {
+  step "Claude Code nastavenia"
 
-  mkdir -p "$WORKSPACE"
+  # Trusted directories
+  if [[ -f "${CLAUDE_HOME}/.claude.json" ]]; then
+    python3 -c "
+import json
+with open('${CLAUDE_HOME}/.claude.json') as f: d=json.load(f)
+d['trustedDirectories'] = {'${CLAUDE_HOME}': True, '${WORKSPACE}': True}
+with open('${CLAUDE_HOME}/.claude.json', 'w') as f: json.dump(d, f, indent=2)
+" 2>/dev/null || true
+  fi
 
-  cat > "$STARTUP_SCRIPT" << 'STARTUP'
-#!/usr/bin/env bash
-# Claude Assistant — štartovací skript
-
-set -a
-source "${HOME}/.claude-assistant/.env" 2>/dev/null || true
-set +a
-
-export BUN_INSTALL="$HOME/.bun"
-export PATH="$BUN_INSTALL/bin:$PATH"
-
-WORKSPACE="${HOME}/.claude-assistant"
-LOG="${WORKSPACE}/agent.log"
-
-mkdir -p "$WORKSPACE/inbox"
-
-echo "[$(date)] Spúšťam Claude Assistant..." >> "$LOG"
-
-# Spustenie gws MCP servera (Gmail + Calendar) ak je dostupný
-if command -v gws &>/dev/null && [[ -f "${WORKSPACE}/gws/credentials.json" ]]; then
-  export GOOGLE_OAUTH_CREDENTIALS="${WORKSPACE}/gws/credentials.json"
-  gws mcp -s gmail,calendar,drive >> "${LOG}" 2>&1 &
-  echo "[$(date)] gws MCP server spustený (PID $!)" >> "$LOG"
-  sleep 2
-fi
-
-# Spustenie Claude Code s Telegram Channels
-exec claude \
-  --dangerously-skip-permissions \
-  --channels plugin:telegram@claude-plugins-official \
-  2>> "$LOG"
-STARTUP
-
-  chmod +x "$STARTUP_SCRIPT"
-  ok "Startup script: $STARTUP_SCRIPT"
+  # Settings.json je už stiahnutý
+  ok "Permissions a trusted directories nastavené"
 }
 
-# ── Autostart — LXC-aware ─────────────────────────────
+# ── Autostart ─────────────────────────────────────────
 setup_autostart() {
-  step "Autostart"
-  divider
+  step "Autostart (tmux + cron)"
 
-  if [[ "$IS_LXC" == true ]] && [[ "$HAS_SYSTEMD" == false ]]; then
-    # LXC bez nesting — automaticky tmux + cron @reboot
-    echo
-    warn "LXC bez systemd — nastavujem tmux + cron @reboot"
-    info "Asistentka sa spustí automaticky pri každom štarte kontajnera."
-    echo
-    setup_tmux_alias
-    setup_cron_reboot
-    return
-  fi
+  # cron @reboot pre claude usera
+  local cron_line="@reboot sleep 10 && tmux new-session -d -s bridge 'bash ${WORKSPACE}/start.sh' >> ${WORKSPACE}/cron.log 2>&1"
 
-  # Inak ponúkni výber
-  echo
-  echo -e "  ${W}Ako má asistentka bežať na pozadí?${N}"
-  echo
-
-  if [[ "$HAS_SYSTEMD" == true ]]; then
-    echo -e "  ${G}1)${N} systemd service ${D}(beží aj po reštarte, odporúčané)${N}"
-    echo -e "  ${G}2)${N} tmux + cron @reboot ${D}(odľahčená alternatíva)${N}"
-    echo -e "  ${G}3)${N} Len startup skript — spustím manuálne"
-  else
-    echo -e "  ${G}1)${N} tmux + cron @reboot ${D}(automatický štart)${N}"
-    echo -e "  ${G}2)${N} Len startup skript — spustím manuálne"
-  fi
-
-  echo
-  ask "Vyber [1/2/3]:"
-  read -r run_choice
-
-  if [[ "$HAS_SYSTEMD" == true ]]; then
-    case "${run_choice:-1}" in
-      1) setup_systemd ;;
-      2) setup_tmux_alias; setup_cron_reboot ;;
-      3) ok "Skript: $STARTUP_SCRIPT"; info "Spusti: bash $STARTUP_SCRIPT" ;;
-    esac
-  else
-    case "${run_choice:-1}" in
-      1) setup_tmux_alias; setup_cron_reboot ;;
-      2) ok "Skript: $STARTUP_SCRIPT"; info "Spusti: bash $STARTUP_SCRIPT" ;;
-    esac
-  fi
-}
-
-setup_systemd() {
-  local current_user
-  current_user=$(whoami)
-
-  sudo tee "$SERVICE_FILE" > /dev/null << UNIT
-[Unit]
-Description=Claude Personal Assistant
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${current_user}
-WorkingDirectory=${WORKSPACE}
-EnvironmentFile=-${ENV_FILE}
-ExecStart=${STARTUP_SCRIPT}
-Restart=on-failure
-RestartSec=30
-StandardOutput=append:${WORKSPACE}/agent.log
-StandardError=append:${WORKSPACE}/agent.log
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  sudo systemctl daemon-reload
-  sudo systemctl enable claude-assistant.service >> "$LOG" 2>&1
-
-  ok "systemd service vytvorený a povolený"
-  info "Spusti:    sudo systemctl start claude-assistant"
-  info "Status:    sudo systemctl status claude-assistant"
-  info "Logy:      journalctl -u claude-assistant -f"
-}
-
-setup_tmux_alias() {
-  # Pridaj alias do .bashrc
-  if ! grep -q 'claude-assistant' "$HOME/.bashrc" 2>/dev/null; then
-    cat >> "$HOME/.bashrc" << 'BASHRC'
-
-# Claude Assistant
-alias assistant-start='tmux new-session -d -s claude-assistant "bash ~/.claude-assistant/start.sh" 2>/dev/null || echo "session uz bezi"'
-alias assistant-attach='tmux attach -t claude-assistant'
-alias assistant-stop='tmux kill-session -t claude-assistant'
-alias assistant-log='tail -f ~/.claude-assistant/agent.log'
-BASHRC
-  fi
-
-  ok "tmux aliasy pridané do ~/.bashrc"
-  info "Spusti:   source ~/.bashrc && assistant-start"
-  info "Pripojiť: assistant-attach"
-  info "Stop:     assistant-stop"
-}
-
-setup_cron_reboot() {
-  # @reboot cron — spustí asistentku pri štarte kontajnera
-  local cron_line="@reboot sleep 10 && tmux new-session -d -s claude-assistant 'bash ${STARTUP_SCRIPT}' >> ${WORKSPACE}/cron.log 2>&1"
-
-  # Pridaj len ak tam ešte nie je
-  if ! (crontab -l 2>/dev/null || true) | grep -q 'claude-assistant'; then
-    ( crontab -l 2>/dev/null; echo "$cron_line" ) | crontab -
-    ok "cron @reboot nastavenoý — asistentka sa spustí automaticky pri štarte"
+  if ! (su - "$CLAUDE_USER" -c 'crontab -l' 2>/dev/null || true) | grep -q 'claude'; then
+    (su - "$CLAUDE_USER" -c 'crontab -l' 2>/dev/null || true; echo "$cron_line") | su - "$CLAUDE_USER" -c 'crontab -'
+    ok "cron @reboot nastavený"
   else
     ok "cron @reboot — už existuje"
   fi
 
-  info "Zobraziť crontab: crontab -l"
+  info "Asistentka sa spustí automaticky pri štarte"
 }
 
-# ── Záverečné párovanie Telegramu ─────────────────────
-telegram_pairing_guide() {
-  step "Párovanie Telegram bota"
-  divider
+# ── Finalizácia ───────────────────────────────────────
+finalize() {
+  # Vlastníctvo
+  chown -R "${CLAUDE_USER}:${CLAUDE_USER}" "$CLAUDE_HOME"
+  chmod 600 "${WORKSPACE}/.env"
 
-  echo
-  echo -e "  ${W}Keď asistentka beží, urob toto:${N}"
-  divider
-  echo
-  echo -e "  ${G}1.${N} Otvor Telegram → nájdi svojho bota (podľa username)"
-  echo -e "  ${G}2.${N} Pošli mu akúkoľvek správu"
-  echo -e "  ${G}3.${N} Bot odpovedá s pairing kódom (napr. ABC-123)"
-  echo -e "  ${G}4.${N} V termináli (pripoj sa cez tmux/ssh) zadaj:"
-  echo
-  echo -e "     ${W}/telegram:access pair ABC-123${N}"
-  echo -e "     ${W}/telegram:access policy allowlist${N}"
-  echo
-  echo -e "  ${G}5.${N} Hotovo! Pošli botovi: ${W}brief${N}"
-  divider
+  # .env nastavenia
+  local env="${WORKSPACE}/.env"
+  chmod 600 "$env"
 }
 
-# ── /loop ranný brief setup ────────────────────────────
-setup_loop() {
-  step "Automatické úlohy (/loop)"
+# ── Prvé spustenie ────────────────────────────────────
+first_start() {
+  step "Prvé spustenie"
 
-  echo
-  echo -e "  ${D}Po spustení asistentky zadaj tieto príkazy v Claude Code:${N}"
-  echo
+  ask "Spustiť asistentku teraz? [y/n]:"
+  read -r start_now
 
-  local loop_cmds="$WORKSPACE/loop-commands.txt"
-  cat > "$loop_cmds" << 'LOOPS'
-# Vlož tieto príkazy do Claude Code po spustení:
+  if [[ "$start_now" =~ ^[Yy]$ ]]; then
+    su - "$CLAUDE_USER" -c "tmux new-session -d -s bridge 'bash ${WORKSPACE}/start.sh'"
+    sleep 5
 
-/loop 1d o 7:30 urob ranný brief — skontroluj Gmail (nové dôležité emaily od včera), Kalendár (dnes a zajtra), expirations.md (splatné do 30 dní) — zhrň to a pošli na Telegram
-
-/loop 1d o 18:00 skontroluj dnešné emaily — ak prišla faktúra alebo zmluva, extrahuj dátum splatnosti a sumu, pridaj do ~/.claude-assistant/expirations.md
-
-/loop 7d každú nedeľu o 9:00 skontroluj všetky položky v expirations.md a zoš mi týždenný prehľad co expiruje nasledujúce 2 mesiace, pošli na Telegram
-LOOPS
-
-  ok "Loop príkazy uložené do: $loop_cmds"
-  info "Skopíruj ich do Claude Code po prvom spustení."
-
-  # Zobraz obsah
-  echo
-  echo -e "  ${D}────── Obsah $loop_cmds ──────${N}"
-  cat "$loop_cmds" | sed 's/^/  /'
-  echo
+    if su - "$CLAUDE_USER" -c "tmux has-session -t bridge" 2>/dev/null; then
+      ok "Bridge beží"
+      if su - "$CLAUDE_USER" -c "tmux has-session -t claude" 2>/dev/null; then
+        ok "Claude Code session beží"
+      else
+        warn "Claude Code session sa ešte štartuje..."
+      fi
+    else
+      warn "Bridge sa nepodarilo spustiť — pozri ${WORKSPACE}/bridge.log"
+    fi
+  fi
 }
 
-# ── Súhrn inštalácie ──────────────────────────────────
+# ── Súhrn ─────────────────────────────────────────────
 print_summary() {
   header
-
   echo -e "  ${G}${BOLD}✓ Inštalácia dokončená!${N}"
   echo
   divider
   echo
-  echo -e "  ${W}Čo bolo nainštalované:${N}"
+  echo -e "  ${W}Nainštalované:${N}"
   command -v node &>/dev/null && ok "Node.js $(node --version)"
-  command -v bun &>/dev/null && ok "Bun $(bun --version)"
-  command -v claude &>/dev/null && ok "Claude Code $(claude --version 2>/dev/null)"
+  command -v bun &>/dev/null && ok "Bun $(bun --version 2>/dev/null)"
+  command -v claude &>/dev/null && ok "Claude Code"
   command -v gws &>/dev/null && ok "Google Workspace CLI"
-  [[ -f "$CLAUDE_MD" ]] && ok "CLAUDE.md — inštrukcie asistentky"
-  [[ -f "$STARTUP_SCRIPT" ]] && ok "Startup script: $STARTUP_SCRIPT"
-  [[ -f "$SERVICE_FILE" ]] && ok "systemd service: claude-assistant"
+  [[ -f "${WORKSPACE}/CLAUDE.md" ]] && ok "CLAUDE.md"
+  [[ -f "${WORKSPACE}/telegram-bridge.py" ]] && ok "Telegram bridge"
   echo
   divider
   echo
-  echo -e "  ${W}Ďalšie kroky:${N}"
+  echo -e "  ${W}Správa:${N}"
   echo
-  echo -e "  ${G}1.${N} Spusti asistentku:"
-
-  if [[ -f "$SERVICE_FILE" ]]; then
-    echo -e "     ${C}sudo systemctl start claude-assistant${N}"
-  else
-    echo -e "     ${C}source ~/.bashrc && assistant-start${N}"
-    echo -e "     ${C}# alebo: tmux new -s claude bash $STARTUP_SCRIPT${N}"
-  fi
-
+  echo -e "  ${G}Pripojiť sa k agentovi:${N}"
+  echo -e "     ${C}su - ${CLAUDE_USER} -c 'tmux attach -t claude'${N}"
+  echo -e "     ${D}(Ctrl+B, D pre detach)${N}"
   echo
-  echo -e "  ${G}2.${N} Páruj Telegram bota:"
-  echo -e "     ${C}(pošli správu botu → zadaj pairing kód v termináli)${N}"
+  echo -e "  ${G}Reštart:${N}"
+  echo -e "     ${C}su - ${CLAUDE_USER} -c 'tmux kill-server; tmux new-session -d -s bridge bash ${WORKSPACE}/start.sh'${N}"
   echo
-  echo -e "  ${G}3.${N} Nastav automatické úlohy v Claude Code:"
-  echo -e "     ${C}cat $WORKSPACE/loop-commands.txt${N}"
+  echo -e "  ${G}Logy:${N}"
+  echo -e "     ${C}tail -f ${WORKSPACE}/bridge.log${N}"
   echo
-  echo -e "  ${G}4.${N} Otestuj:"
-  echo -e "     ${C}Pošli botovi: brief${N}"
+  echo -e "  ${G}SSH:${N}"
+  local ip
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+  echo -e "     ${C}ssh ${CLAUDE_USER}@${ip:-<IP>}${N}"
   echo
   divider
-  echo
-  echo -e "  ${D}Log inštalácie: $LOG${N}"
-  echo -e "  ${D}Workspace:      $WORKSPACE${N}"
   echo
 }
 
 # ── Hlavný tok ────────────────────────────────────────
 main() {
   header
-  require_root_or_sudo
 
-  mkdir -p "$WORKSPACE"
-  log "=== Začiatok inštalácie Claude Assistant v${VERSION} ==="
+  if [[ $EUID -ne 0 ]]; then
+    err "Spusti ako root: sudo bash install.sh"
+    exit 1
+  fi
 
-  echo -e "  ${D}Tento skript nainštaluje a nakonfiguruje Claude Code${N}"
-  echo -e "  ${D}ako osobnú AI asistentku s Telegram prístupom.${N}"
-  echo
-  echo -e "  ${W}Čo bude nainštalované:${N}"
-  echo -e "  ${D}• Node.js 20+, Bun, Claude Code, Google Workspace CLI${N}"
-  echo -e "  ${D}• Telegram bot plugin pre Claude Code Channels${N}"
-  echo -e "  ${D}• CLAUDE.md — konfigurácia asistentky${N}"
-  echo -e "  ${D}• Autostart (systemd / tmux+cron podľa prostredia)${N}"
+  echo -e "  ${D}Nainštaluje Claude Code ako osobnú AI asistentku${N}"
+  echo -e "  ${D}s Telegram prístupom. Beží ako user '${CLAUDE_USER}'.${N}"
   echo
   ask "Pokračovať? [y/n]:"
   read -r confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Zrušené."; exit 0; }
 
+  log "=== Inštalácia v${VERSION} ==="
+
   detect_environment
-  check_os
   check_internet
   install_deps
+  create_claude_user
   install_node
   install_bun
   install_claude_code
   install_gws
   setup_claude_auth
-  setup_google_workspace
+  setup_google_auth
   setup_telegram
+  download_files
   generate_claude_md
-  create_startup_script
+  setup_claude_settings
+  finalize
   setup_autostart
-  setup_loop
-  telegram_pairing_guide
+  first_start
 
   log "=== Inštalácia dokončená ==="
   print_summary
